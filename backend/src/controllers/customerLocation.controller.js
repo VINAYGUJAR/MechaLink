@@ -1,73 +1,74 @@
-
-const CustomerLocation = require("../models/CustomerLocation");
-const geocodeAddress = require("../services/geocoding.service");
+const { prisma } = require("../config/db");
+const sendPrismaError = require("../utils/prismaErrors");
+const { geoJsonPoint } = require("../utils/serializers");
 
 async function saveMyLocation(req, res) {
   try {
-    const { address } = req.body;
+    const { name, formattedAddress, latitude, longitude } = req.body || {};
 
     if (
-      typeof address !== "string" ||
-      address.trim().length < 5 ||
-      address.trim().length > 300
+      typeof name !== "string" ||
+      !name.trim() ||
+      name.trim().length > 160 ||
+      typeof formattedAddress !== "string" ||
+      formattedAddress.trim().length < 3 ||
+      formattedAddress.trim().length > 300
     ) {
       return res.status(400).json({
         success: false,
-        message: "Please enter a valid address",
+        message: "Please select a valid location",
       });
     }
 
-    const result = await geocodeAddress(address.trim());
-
-    if (!result) {
+    if (
+      typeof latitude !== "number" ||
+      !Number.isFinite(latitude) ||
+      latitude < -90 ||
+      latitude > 90 ||
+      typeof longitude !== "number" ||
+      !Number.isFinite(longitude) ||
+      longitude < -180 ||
+      longitude > 180
+    ) {
       return res.status(400).json({
         success: false,
-        message: "Address not found. Please enter a more complete address",
+        message: "Please select a location with valid coordinates",
       });
     }
 
-    const savedLocation = await CustomerLocation.findOneAndUpdate(
-      { customer: req.user.userId },
-      {
-        $set: {
-          address: result.formattedAddress,
-          location: {
-            type: "Point",
-            coordinates: [
-              result.longitude,
-              result.latitude,
-            ],
-          },
-        },
+    const savedLocation = await prisma.customerLocation.upsert({
+      where: { customerId: req.user.userId },
+      create: {
+        customerId: req.user.userId,
+        address: formattedAddress.trim(),
+        longitude,
+        latitude,
       },
-      {
-        new: true,
-        upsert: true,
-        runValidators: true,
-        setDefaultsOnInsert: true,
-      }
-    );
+      update: {
+        address: formattedAddress.trim(),
+        longitude,
+        latitude,
+      },
+    });
 
     return res.status(200).json({
       success: true,
       message: "Breakdown location saved successfully",
+      name: name.trim(),
       address: savedLocation.address,
-      location: savedLocation.location,
+      formattedAddress: savedLocation.address,
+      location: geoJsonPoint(savedLocation.longitude, savedLocation.latitude),
     });
   } catch (error) {
     console.error("Save customer location error:", error.message);
-
-    return res.status(500).json({
-      success: false,
-      message: "Unable to save breakdown location",
-    });
+    return sendPrismaError(res, error, "Unable to save breakdown location");
   }
 }
 
 async function getMyLocation(req, res) {
   try {
-    const savedLocation = await CustomerLocation.findOne({
-      customer: req.user.userId,
+    const savedLocation = await prisma.customerLocation.findUnique({
+      where: { customerId: req.user.userId },
     });
 
     if (!savedLocation) {
@@ -79,16 +80,14 @@ async function getMyLocation(req, res) {
 
     return res.status(200).json({
       success: true,
+      name: savedLocation.address,
       address: savedLocation.address,
-      location: savedLocation.location,
+      formattedAddress: savedLocation.address,
+      location: geoJsonPoint(savedLocation.longitude, savedLocation.latitude),
     });
   } catch (error) {
     console.error("Get customer location error:", error.message);
-
-    return res.status(500).json({
-      success: false,
-      message: "Unable to retrieve breakdown location",
-    });
+    return sendPrismaError(res, error, "Unable to retrieve breakdown location");
   }
 }
 

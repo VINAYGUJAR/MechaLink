@@ -2,6 +2,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import api from "../api/axios";
+import {
+  getPlaceDetails,
+  isPlacesSearchConfigured,
+  searchPlaces,
+} from "../utils/places";
 
 const SERVICES = [
   "Engine Repair",
@@ -228,203 +233,66 @@ function GarageProfileForm({ onSave, saving, onCancel }) {
   );
 }
 
-const ADDRESS_FIELDS = [
-  {
-    name: "street",
-    label: "House / Shop No. & Street",
-    placeholder: "Shop 12, Main Road",
-  },
-  {
-    name: "area",
-    label: "Area / Locality",
-    placeholder: "Station Road",
-  },
-  { name: "city", label: "City / Town", placeholder: "Akola" },
-  { name: "district", label: "District", placeholder: "Akola" },
-  { name: "state", label: "State", placeholder: "Maharashtra" },
-  { name: "pincode", label: "PIN Code", placeholder: "444001" },
-  { name: "country", label: "Country", placeholder: "India" },
-];
-
-const EMPTY_ADDRESS = {
-  street: "",
-  area: "",
-  city: "",
-  district: "",
-  state: "",
-  pincode: "",
-  country: "India",
-};
-
-function buildAddress(form) {
-  return [
-    form.street,
-    form.area,
-    form.city,
-    form.district,
-    form.state,
-    form.pincode,
-    form.country,
-  ]
-    .map((part) => (part || "").trim())
-    .filter(Boolean)
-    .join(", ");
-}
-
 function GarageLocationForm({
   currentAddress,
   onSave,
   saving,
   onCancel,
 }) {
-  const [form, setForm] = useState(() => ({
-    ...EMPTY_ADDRESS,
-    street: currentAddress || "",
-  }));
+  const [searchText, setSearchText] = useState("");
   const [suggestions, setSuggestions] = useState([]);
+  const [selectedLocation, setSelectedLocation] = useState(null);
   const [searching, setSearching] = useState(false);
   const [error, setError] = useState("");
   const [lookupMessage, setLookupMessage] = useState("");
 
-  const apiKey = import.meta.env.VITE_GEOAPIFY_API_KEY;
-
   useEffect(() => {
-    const query = [
-      form.street,
-      form.area,
-      form.city,
-      form.district,
-      form.state,
-      form.pincode,
-      form.country,
-    ]
-      .filter(Boolean)
-      .join(", ")
-      .trim();
+    const query = searchText.trim();
 
-    if (!apiKey || query.length < 4) {
-      setSuggestions([]);
-      setSearching(false);
-      setLookupMessage("");
+    if (query.length < 3 || selectedLocation?.formattedAddress === query) {
       return undefined;
     }
 
     let cancelled = false;
-
     const timer = setTimeout(async () => {
       setSearching(true);
       setLookupMessage("");
 
       try {
-        const url = new URL(
-          "https://api.geoapify.com/v1/geocode/autocomplete"
-        );
-
-        url.searchParams.set("text", query);
-        url.searchParams.set("format", "json");
-        url.searchParams.set("limit", "5");
-        url.searchParams.set("filter", "countrycode:in");
-        url.searchParams.set("apiKey", apiKey);
-
-        const response = await fetch(url.toString());
-
-        if (!response.ok) {
-          throw new Error("Address search failed.");
-        }
-
-        const data = await response.json();
-
+        const results = await searchPlaces(query);
         if (!cancelled) {
-          const results = Array.isArray(data.results) ? data.results : [];
           setSuggestions(results);
-
           if (results.length === 0) {
-            setLookupMessage("No matching addresses found. You can continue typing.");
+            setLookupMessage("No matching addresses found. Keep typing to search.");
           }
         }
-      } catch {
+      } catch (searchError) {
         if (!cancelled) {
           setSuggestions([]);
-          setLookupMessage(
-            "Address suggestions are unavailable. You can enter the address manually."
-          );
+          setLookupMessage(searchError.message || "Address suggestions are unavailable.");
         }
       } finally {
         if (!cancelled) setSearching(false);
       }
-    }, 500);
+    }, 300);
 
     return () => {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [
-    apiKey,
-    form.street,
-    form.area,
-    form.city,
-    form.district,
-    form.state,
-    form.pincode,
-    form.country,
-  ]);
-
-  function updateField(event) {
-    const { name, value } = event.target;
-    setForm((current) => ({ ...current, [name]: value }));
-    setError("");
-  }
-
-  function selectSuggestion(item) {
-    setForm({
-      street:
-        [item.housenumber, item.street].filter(Boolean).join(" ") ||
-        item.address_line1 ||
-        "",
-      area:
-        item.suburb ||
-        item.neighbourhood ||
-        item.quarter ||
-        item.city_district ||
-        "",
-      city: item.city || item.town || item.village || "",
-      district: item.county || item.district || "",
-      state: item.state || "",
-      pincode: item.postcode || "",
-      country: item.country || "India",
-    });
-
-    setSuggestions([]);
-    setLookupMessage("Address selected. Review the fields before saving.");
-    setError("");
-  }
+  }, [searchText, selectedLocation]);
 
   async function submit(event) {
     event.preventDefault();
     setError("");
 
-    if (
-      !form.street.trim() ||
-      !form.city.trim() ||
-      !form.state.trim() ||
-      !form.pincode.trim() ||
-      !form.country.trim()
-    ) {
-      setError(
-        "Please fill in street, city, state, PIN code, and country."
-      );
-      return;
-    }
-
-    const address = buildAddress(form);
-
-    if (address.length < 5 || address.length > 300) {
-      setError("Your complete address must be between 5 and 300 characters.");
+    if (!selectedLocation) {
+      setError("Select a Google Maps address suggestion before saving.");
       return;
     }
 
     try {
-      await onSave(address);
+      await onSave(selectedLocation);
     } catch (err) {
       setError(
         err.response?.data?.message ||
@@ -441,8 +309,8 @@ function GarageLocationForm({
             Update garage location
           </h2>
           <p className="mt-1 text-sm leading-6 text-slate-500">
-            Fill in your garage address. Select a Geoapify suggestion if
-            available, then save it to update your map location.
+            Search for your garage and select a Google Maps suggestion to save
+            its address and coordinates.
           </p>
         </div>
 
@@ -464,10 +332,10 @@ function GarageLocationForm({
         </div>
       )}
 
-      {!apiKey && (
+      {!isPlacesSearchConfigured() && (
         <p className="mt-4 rounded-xl bg-amber-50 p-3 text-sm text-amber-800">
-          Geoapify suggestions need VITE_GEOAPIFY_API_KEY in your frontend
-          .env file. You can still enter your address manually.
+          Add VITE_GOOGLE_MAPS_API_KEY or VITE_GEOAPIFY_API_KEY to the frontend
+          .env file to enable location search.
         </p>
       )}
 
@@ -478,18 +346,29 @@ function GarageLocationForm({
       )}
 
       <form onSubmit={submit} className="mt-5 space-y-5">
-        <div className="grid gap-4 sm:grid-cols-2">
-          {ADDRESS_FIELDS.map((field) => (
-            <Field
-              key={field.name}
-              {...field}
-              value={form[field.name]}
-              onChange={updateField}
-              required={["street", "city", "state", "pincode", "country"].includes(
-                field.name
-              )}
-            />
-          ))}
+        <div>
+          <label
+            htmlFor="garage-location-search"
+            className="mb-2 block text-sm font-semibold text-slate-700"
+          >
+            Search garage address
+          </label>
+          <input
+            id="garage-location-search"
+            type="search"
+            autoComplete="off"
+            value={searchText}
+            onChange={(event) => {
+              setSearchText(event.target.value);
+              setSelectedLocation(null);
+              setSuggestions([]);
+              setError("");
+              setLookupMessage("");
+              setSearching(false);
+            }}
+            placeholder="Type an address and select a suggestion"
+            className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+          />
         </div>
 
         {searching && (
@@ -505,20 +384,53 @@ function GarageLocationForm({
         {suggestions.length > 0 && (
           <div className="overflow-hidden rounded-xl border border-slate-200">
             <p className="bg-slate-50 px-4 py-3 text-xs font-bold uppercase tracking-wide text-slate-500">
-              Choose a Geoapify suggestion
+              Choose an address suggestion
             </p>
 
-            {suggestions.map((item, index) => (
+            {suggestions.map((suggestion, index) => (
               <button
                 type="button"
-                key={`${item.place_id || item.formatted || "address"}-${index}`}
-                onClick={() => selectSuggestion(item)}
+                key={`${suggestion.description}-${index}`}
+                onClick={async () => {
+                  setSearching(true);
+                  setLookupMessage("");
+                  setError("");
+
+                  try {
+                    const place = await getPlaceDetails(
+                      suggestion.prediction,
+                      suggestion.provider
+                    );
+                    setSelectedLocation(place);
+                    setSearchText(place.formattedAddress);
+                    setSuggestions([]);
+                    setLookupMessage("Address selected.");
+                  } catch (selectionError) {
+                    setLookupMessage(
+                      selectionError.message ||
+                        "Could not load the selected address."
+                    );
+                  } finally {
+                    setSearching(false);
+                  }
+                }}
                 className="flex w-full gap-3 border-t border-slate-100 px-4 py-3 text-left text-sm text-slate-700 hover:bg-blue-50"
               >
                 <span aria-hidden="true">⌖</span>
-                <span>{item.formatted || "Suggested address"}</span>
+                <span>{suggestion.description}</span>
               </button>
             ))}
+          </div>
+        )}
+
+        {selectedLocation && (
+          <div className="rounded-xl border border-blue-100 bg-blue-50 p-4">
+            <p className="font-semibold text-slate-800">
+              {selectedLocation.name}
+            </p>
+            <p className="mt-1 text-sm text-slate-600">
+              {selectedLocation.formattedAddress}
+            </p>
           </div>
         )}
 
@@ -527,13 +439,14 @@ function GarageLocationForm({
             Address preview
           </p>
           <p className="mt-2 text-sm leading-6 text-slate-800">
-            {buildAddress(form) || "Your complete address will appear here."}
+            {selectedLocation?.formattedAddress ||
+              "Select an address suggestion to preview your garage location."}
           </p>
         </div>
 
         <button
           type="submit"
-          disabled={saving}
+          disabled={saving || !selectedLocation}
           className="w-full rounded-xl bg-blue-600 px-5 py-3 font-semibold text-white hover:bg-blue-700 disabled:opacity-60 sm:w-auto"
         >
           {saving ? "Updating location..." : "Update garage location"}
@@ -853,17 +766,22 @@ export default function MechanicDashboard() {
     }
   }
 
-  async function handleUpdateLocation(address) {
+  async function handleUpdateLocation(location) {
     setSavingLocation(true);
     setError("");
     setSuccess("");
 
     try {
       // Existing backend route: PATCH /api/mechanics/me/location
-      const response = await api.patch("/mechanics/me/location", { address });
+      const response = await api.patch("/mechanics/me/location", {
+        name: location.name,
+        address: location.formattedAddress,
+        latitude: location.latitude,
+        longitude: location.longitude,
+      });
 
       const savedAddress =
-        response.data?.garageAddress || address;
+        response.data?.garageAddress || location.formattedAddress;
 
       setProfile((current) =>
         current

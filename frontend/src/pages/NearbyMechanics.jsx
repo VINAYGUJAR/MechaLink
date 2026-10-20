@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import api from "../api/axios";
+import { getNearbyMechanicsParams } from "../utils/nearbyMechanics";
 
 function NearbyMechanics() {
   const [mechanics, setMechanics] = useState([]);
@@ -42,25 +43,54 @@ function NearbyMechanics() {
     // Load each section independently. If nearby mechanics cannot load,
     // vehicles and existing assistance requests can still be displayed.
     const results = await Promise.allSettled([
-      api.get("/customer/mechanics/nearby", {
-        params: { radiusKm },
-      }),
+      api.get("/customer-location/me"),
       api.get("/vehicles"),
       api.get("/customer/assistance-requests"),
     ]);
 
-    const [mechanicsResult, vehiclesResult, requestsResult] = results;
+    const [locationResult, vehiclesResult, requestsResult] = results;
 
-    if (mechanicsResult.status === "fulfilled") {
-      const data = mechanicsResult.value.data;
-      setMechanics(getArray(data, "mechanics"));
+    if (locationResult.status === "fulfilled") {
+      const coordinates =
+        locationResult.value.data?.location?.coordinates;
+
+      if (
+        !Array.isArray(coordinates) ||
+        !Number.isFinite(coordinates[0]) ||
+        !Number.isFinite(coordinates[1])
+      ) {
+        setMechanics([]);
+        setMechanicsError(
+          "Select a valid location from your customer dashboard before searching."
+        );
+      } else {
+        try {
+          const mechanicsResult = await api.get(
+            "/customer/mechanics/nearby",
+            {
+              params: getNearbyMechanicsParams(coordinates, radiusKm),
+            }
+          );
+          setMechanics(getArray(mechanicsResult.data, "mechanics"));
+        } catch (mechanicsRequestError) {
+          setMechanics([]);
+          setMechanicsError(
+            getErrorMessage(
+              mechanicsRequestError,
+              "Could not load nearby mechanics."
+            )
+          );
+        }
+      }
     } else {
       setMechanics([]);
       setMechanicsError(
-        getErrorMessage(
-          mechanicsResult.reason,
-          "Could not load nearby mechanics."
-        )
+        locationResult.reason?.response?.status === 404
+          ? "Select a location from your customer dashboard before searching."
+          : getErrorMessage(
+              locationResult.reason,
+              "Could not load your selected location."
+            )
       );
     }
 
@@ -317,10 +347,12 @@ function NearbyMechanics() {
               </p>
 
               {mechanicsError.toLowerCase().includes("breakdown address") ||
-              mechanicsError.toLowerCase().includes("save your") ? (
+              mechanicsError.toLowerCase().includes("save your") ||
+              mechanicsError.toLowerCase().includes("select a location") ? (
                 <p className="mt-2 text-sm text-amber-800">
-                  Open your customer dashboard and save your breakdown
-                  address before searching again.
+                  Open your customer dashboard, use your current location or
+                  select an address suggestion, and save it before searching
+                  again.
                 </p>
               ) : null}
 

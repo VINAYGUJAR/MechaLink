@@ -1,12 +1,22 @@
-
 const bcrypt = require("bcryptjs");
-const User = require("../models/User");
+const jwt = require("jsonwebtoken");
+const { prisma } = require("../config/db");
+const sendPrismaError = require("../utils/prismaErrors");
+
+function authUser(user) {
+  return {
+    id: user.id,
+    name: user.name,
+    email: user.email,
+    phone: user.phone,
+    role: user.role,
+  };
+}
 
 async function register(req, res) {
   try {
     const { name, email, phone, password, role } = req.body;
 
-    // 1. Check required fields
     if (!name || !email || !password) {
       return res.status(400).json({
         success: false,
@@ -14,7 +24,6 @@ async function register(req, res) {
       });
     }
 
-    // 2. Validate the password
     if (typeof password !== "string" || password.length < 8) {
       return res.status(400).json({
         success: false,
@@ -22,7 +31,20 @@ async function register(req, res) {
       });
     }
 
-    // 3. Validate and normalize the email
+    if (typeof name !== "string" || name.trim().length < 2 || name.trim().length > 80) {
+      return res.status(400).json({
+        success: false,
+        message: "Name must contain between 2 and 80 characters",
+      });
+    }
+
+    if (phone !== undefined && typeof phone !== "string") {
+      return res.status(400).json({
+        success: false,
+        message: "Phone must be text",
+      });
+    }
+
     if (typeof email !== "string") {
       return res.status(400).json({
         success: false,
@@ -31,15 +53,16 @@ async function register(req, res) {
     }
 
     const normalizedEmail = email.trim().toLowerCase();
-
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+    if (
+      normalizedEmail.length > 254 ||
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)
+    ) {
       return res.status(400).json({
         success: false,
         message: "Invalid email address",
       });
     }
 
-    // Public registration must not create admin accounts
     if (role && !["customer", "mechanic"].includes(role)) {
       return res.status(400).json({
         success: false,
@@ -47,9 +70,9 @@ async function register(req, res) {
       });
     }
 
-    // 4. Check if the email already exists
-    const existingUser = await User.findOne({
-      email: normalizedEmail,
+    const existingUser = await prisma.user.findUnique({
+      where: { email: normalizedEmail },
+      select: { id: true },
     });
 
     if (existingUser) {
@@ -59,55 +82,41 @@ async function register(req, res) {
       });
     }
 
-    // 5. Hash the password
     const hashedPassword = await bcrypt.hash(password, 12);
-
-    // 6. Save the new user in MongoDB
-    const user = await User.create({
-      name,
-      email: normalizedEmail,
-      phone,
-      password: hashedPassword,
-      role: role || "customer",
+    const user = await prisma.user.create({
+      data: {
+        name: name.trim(),
+        email: normalizedEmail,
+        phone: phone?.trim() || "",
+        password: hashedPassword,
+        role: role || "customer",
+      },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        phone: true,
+        role: true,
+      },
     });
 
-    // 7. Return the safe user details
     return res.status(201).json({
       success: true,
       message: "Registration successful",
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        phone: user.phone,
-        role: user.role,
-      },
+      user: authUser(user),
     });
   } catch (error) {
-    // Handle duplicate email index conflicts
-    if (error.code === 11000) {
-      return res.status(409).json({
-        success: false,
-        message: "Email is already registered",
-      });
-    }
-
     console.error("Registration error:", error.message);
-
-    return res.status(500).json({
-      success: false,
-      message: "Registration failed",
+    return sendPrismaError(res, error, "Registration failed", {
+      P2002: "Email is already registered",
     });
   }
 }
-
-const jwt = require("jsonwebtoken");
 
 async function login(req, res) {
   try {
     const { email, password } = req.body;
 
-    // 1. Check required fields
     if (
       typeof email !== "string" ||
       typeof password !== "string" ||
@@ -120,71 +129,58 @@ async function login(req, res) {
       });
     }
 
-    // 2. Find the user by email
-    // Password is excluded by default in our User model,
-    // so explicitly request it for password verification.
-    const user = await User.findOne({
-      email: email.trim().toLowerCase(),
-    }).select("+password");
+    const user = await prisma.user.findUnique({
+      where: { email: email.trim().toLowerCase() },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        phone: true,
+        role: true,
+        password: true,
+      },
+    });
 
-    if (!user) {
+    if (!user || !(await bcrypt.compare(password, user.password))) {
       return res.status(401).json({
         success: false,
         message: "Invalid email or password",
       });
     }
 
-    // 3. Compare entered password with the stored hash
-    const passwordMatches = await bcrypt.compare(
-      password,
-      user.password
-    );
-
-    if (!passwordMatches) {
-      return res.status(401).json({
-        success: false,
-        message: "Invalid email or password",
-      });
-    }
-
-    // 4. Create an authentication token
     const token = jwt.sign(
       {
-        userId: user._id.toString(),
+        userId: user.id,
         role: user.role,
       },
       process.env.JWT_SECRET,
       { expiresIn: "1d" }
     );
 
-    // 5. Send the response without the password
     return res.status(200).json({
       success: true,
       message: "Login successful",
       token,
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        phone: user.phone,
-        role: user.role,
-      },
+      user: authUser(user),
     });
   } catch (error) {
     console.error("Login error:", error.message);
-
-    return res.status(500).json({
-      success: false,
-      message: "Login failed",
-    });
+    return sendPrismaError(res, error, "Login failed");
   }
 }
 
-// It will return the details of the currently logged-in user. A request without a valid token will be rejected
-
 async function getMe(req, res) {
   try {
-    const user = await User.findById(req.user.userId);
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.userId },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        phone: true,
+        role: true,
+      },
+    });
 
     if (!user) {
       return res.status(404).json({
@@ -195,22 +191,12 @@ async function getMe(req, res) {
 
     return res.status(200).json({
       success: true,
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        phone: user.phone,
-        role: user.role,
-      },
+      user: authUser(user),
     });
   } catch (error) {
     console.error("Get profile error:", error.message);
-
-    return res.status(500).json({
-      success: false,
-      message: "Unable to retrieve profile",
-    });
+    return sendPrismaError(res, error, "Unable to retrieve profile");
   }
 }
 
-module.exports = { register , login, getMe  };
+module.exports = { register, login, getMe };

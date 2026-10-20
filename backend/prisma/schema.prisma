@@ -1,0 +1,122 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserRole {
+  customer
+  mechanic
+  admin
+}
+
+enum MechanicVerificationStatus {
+  pending
+  approved
+  rejected
+}
+
+enum VehicleType {
+  car
+  bike
+  scooter
+  truck
+  other
+}
+
+enum EmergencyRequestStatus {
+  pending
+  accepted
+  in_progress
+  completed
+  cancelled
+}
+
+model User {
+  id              String            @id @default(cuid())
+  name            String            @db.VarChar(80)
+  email           String            @unique
+  phone           String            @default("")
+  password        String
+  role            UserRole          @default(customer)
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  mechanic        Mechanic?
+  customerLocation CustomerLocation?
+  vehicles        Vehicle[]
+  customerRequests EmergencyRequest[] @relation("RequestCustomer")
+
+  @@index([role, createdAt])
+}
+
+model Mechanic {
+  id                 String                     @id @default(cuid())
+  userId             String                     @unique
+  garageName         String                     @db.VarChar(100)
+  description        String                     @default("") @db.VarChar(1000)
+  garageAddress      String                     @default("")
+  services           String[]                   @default([])
+  // Keep longitude/latitude separate; API GeoJSON serializes them as [longitude, latitude].
+  longitude          Float?
+  latitude           Float?
+  verificationStatus MechanicVerificationStatus @default(pending)
+  createdAt          DateTime                   @default(now())
+  updatedAt          DateTime                   @updatedAt
+  user               User                       @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  requests           EmergencyRequest[]
+
+  @@index([verificationStatus, latitude, longitude])
+}
+
+model CustomerLocation {
+  id        String   @id @default(cuid())
+  customerId String  @unique
+  address   String
+  // Keep longitude/latitude separate; API GeoJSON serializes them as [longitude, latitude].
+  longitude Float
+  latitude  Float
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  customer  User     @relation(fields: [customerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+}
+
+model Vehicle {
+  id                 String      @id @default(cuid())
+  ownerId            String
+  make               String
+  model              String
+  year               Int
+  registrationNumber String
+  vehicleType        VehicleType @default(car)
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
+  owner              User        @relation(fields: [ownerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  requests           EmergencyRequest[]
+
+  @@index([ownerId])
+}
+
+model EmergencyRequest {
+  id                 String                @id @default(cuid())
+  customerId         String
+  vehicleId          String
+  mechanicId         String
+  breakdownAddress   String
+  breakdownLongitude Float
+  breakdownLatitude  Float
+  description        String                @db.VarChar(1000)
+  status             EmergencyRequestStatus @default(pending)
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
+  customer           User                  @relation("RequestCustomer", fields: [customerId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  vehicle            Vehicle               @relation(fields: [vehicleId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  mechanic           Mechanic              @relation(fields: [mechanicId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@index([customerId, createdAt])
+  @@index([mechanicId, status, createdAt])
+  @@index([vehicleId])
+}

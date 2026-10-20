@@ -1,15 +1,13 @@
-
-const mongoose = require("mongoose");
-const Mechanic = require("../models/Mechanic");
-const User = require("../models/User");
-const EmergencyRequest = require("../models/EmergencyRequest");
+const { prisma } = require("../config/db");
+const sendPrismaError = require("../utils/prismaErrors");
+const { serializeMechanic } = require("../utils/serializers");
 
 async function verifyMechanic(req, res) {
   try {
     const { mechanicId } = req.params;
     const { status } = req.body;
 
-    if (!mongoose.isValidObjectId(mechanicId)) {
+    if (typeof mechanicId !== "string" || !mechanicId.trim()) {
       return res.status(400).json({
         success: false,
         message: "Invalid mechanic ID",
@@ -23,11 +21,9 @@ async function verifyMechanic(req, res) {
       });
     }
 
-    const mechanic = await Mechanic.findByIdAndUpdate(
-      mechanicId,
-      { verificationStatus: status },
-      { new: true, runValidators: true }
-    );
+    const mechanic = await prisma.mechanic.findUnique({
+      where: { id: mechanicId },
+    });
 
     if (!mechanic) {
       return res.status(404).json({
@@ -36,22 +32,21 @@ async function verifyMechanic(req, res) {
       });
     }
 
+    const updatedMechanic = await prisma.mechanic.update({
+      where: { id: mechanicId },
+      data: { verificationStatus: status },
+    });
+
     return res.status(200).json({
       success: true,
       message: `Mechanic profile ${status}`,
-      profile: mechanic,
+      profile: serializeMechanic(updatedMechanic),
     });
   } catch (error) {
     console.error("Mechanic verification error:", error.message);
-
-    return res.status(500).json({
-      success: false,
-      message: "Unable to verify mechanic",
-    });
+    return sendPrismaError(res, error, "Unable to verify mechanic");
   }
 }
-
-
 
 async function getMechanics(req, res) {
   try {
@@ -66,27 +61,40 @@ async function getMechanics(req, res) {
     }
 
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
-    const limit = Math.min(
-      Math.max(parseInt(req.query.limit, 10) || 10, 1),
-      100
-    );
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 10, 1), 100);
+    const where = status ? { verificationStatus: status } : {};
 
-    const filter = status ? { verificationStatus: status } : {};
-    const total = await Mechanic.countDocuments(filter);
-
-    const mechanics = await Mechanic.find(filter)
-      .select(
-        "user garageName description services garageAddress verificationStatus createdAt"
-      )
-      .populate("user", "name email phone")
-      .sort({ createdAt: -1 })
-      .skip((page - 1) * limit)
-      .limit(limit)
-      .lean();
+    const [total, mechanics] = await Promise.all([
+      prisma.mechanic.count({ where }),
+      prisma.mechanic.findMany({
+        where,
+        select: {
+          id: true,
+          userId: true,
+          garageName: true,
+          description: true,
+          services: true,
+          garageAddress: true,
+          verificationStatus: true,
+          createdAt: true,
+          user: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+              phone: true,
+            },
+          },
+        },
+        orderBy: { createdAt: "desc" },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+    ]);
 
     return res.status(200).json({
       success: true,
-      mechanics,
+      mechanics: mechanics.map(serializeMechanic),
       pagination: {
         total,
         page,
@@ -96,15 +104,9 @@ async function getMechanics(req, res) {
     });
   } catch (error) {
     console.error("Get mechanics error:", error.message);
-
-    return res.status(500).json({
-      success: false,
-      message: "Unable to fetch mechanic profiles",
-    });
+    return sendPrismaError(res, error, "Unable to fetch mechanic profiles");
   }
 }
-
-
 
 async function getUsers(req, res) {
   try {
@@ -119,24 +121,37 @@ async function getUsers(req, res) {
     }
 
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
-    const limit = Math.min(
-      Math.max(parseInt(req.query.limit, 10) || 10, 1),
-      100
-    );
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 10, 1), 100);
+    const where = role ? { role } : {};
 
-    const filter = role ? { role } : {};
-    const total = await User.countDocuments(filter);
-
-    const users = await User.find(filter)
-      .select("name email phone role createdAt")
-      .sort({ createdAt: -1 })
-      .skip((page - 1) * limit)
-      .limit(limit)
-      .lean();
+    const [total, users] = await Promise.all([
+      prisma.user.count({ where }),
+      prisma.user.findMany({
+        where,
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          phone: true,
+          role: true,
+          createdAt: true,
+        },
+        orderBy: { createdAt: "desc" },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+    ]);
 
     return res.status(200).json({
       success: true,
-      users,
+      users: users.map((user) => ({
+        _id: user.id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+        role: user.role,
+        createdAt: user.createdAt,
+      })),
       pagination: {
         total,
         page,
@@ -146,15 +161,11 @@ async function getUsers(req, res) {
     });
   } catch (error) {
     console.error("Get users error:", error.message);
-
-    return res.status(500).json({
-      success: false,
-      message: "Unable to fetch users",
-    });
+    return sendPrismaError(res, error, "Unable to fetch users");
   }
 }
 
-const getDashboardStats = async (req, res) => {
+async function getDashboardStats(req, res) {
   try {
     const [
       totalCustomers,
@@ -162,17 +173,13 @@ const getDashboardStats = async (req, res) => {
       pendingMechanicApprovals,
       requestCounts,
     ] = await Promise.all([
-      User.countDocuments({ role: "customer" }),
-      User.countDocuments({ role: "mechanic" }),
-      Mechanic.countDocuments({ verificationStatus: "pending" }),
-      EmergencyRequest.aggregate([
-        {
-          $group: {
-            _id: "$status",
-            count: { $sum: 1 },
-          },
-        },
-      ]),
+      prisma.user.count({ where: { role: "customer" } }),
+      prisma.user.count({ where: { role: "mechanic" } }),
+      prisma.mechanic.count({ where: { verificationStatus: "pending" } }),
+      prisma.emergencyRequest.groupBy({
+        by: ["status"],
+        _count: { _all: true },
+      }),
     ]);
 
     const requestsByStatus = {
@@ -183,9 +190,9 @@ const getDashboardStats = async (req, res) => {
       cancelled: 0,
     };
 
-    requestCounts.forEach((item) => {
-      requestsByStatus[item._id] = item.count;
-    });
+    for (const item of requestCounts) {
+      requestsByStatus[item.status] = item._count._all;
+    }
 
     return res.status(200).json({
       success: true,
@@ -198,12 +205,13 @@ const getDashboardStats = async (req, res) => {
     });
   } catch (error) {
     console.error("Dashboard statistics error:", error.message);
-
-    return res.status(500).json({
-      success: false,
-      message: "Failed to fetch dashboard statistics",
-    });
+    return sendPrismaError(res, error, "Failed to fetch dashboard statistics");
   }
-};
+}
 
-module.exports = { verifyMechanic , getMechanics, getUsers,getDashboardStats, };
+module.exports = {
+  verifyMechanic,
+  getMechanics,
+  getUsers,
+  getDashboardStats,
+};

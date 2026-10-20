@@ -1,10 +1,7 @@
-// Public registration must not allow someone to register as an admin. We'll create an admin using a local setup script instead.
-
 require("dotenv").config();
 
 const bcrypt = require("bcryptjs");
-const connectDB = require("../config/db");
-const User = require("../models/User");
+const { connectDB, prisma } = require("../config/db");
 
 async function createAdmin() {
   try {
@@ -16,15 +13,24 @@ async function createAdmin() {
       );
     }
 
+    if (
+      ADMIN_NAME.trim().length < 2 ||
+      ADMIN_NAME.trim().length > 80
+    ) {
+      throw new Error("Admin name must contain between 2 and 80 characters");
+    }
+
     if (ADMIN_PASSWORD.length < 8) {
       throw new Error("Admin password must be at least 8 characters");
     }
 
     await connectDB();
-
     const email = ADMIN_EMAIL.trim().toLowerCase();
 
-    const existingUser = await User.findOne({ email });
+    const existingUser = await prisma.user.findUnique({
+      where: { email },
+      select: { id: true },
+    });
 
     if (existingUser) {
       throw new Error(
@@ -33,12 +39,13 @@ async function createAdmin() {
     }
 
     const hashedPassword = await bcrypt.hash(ADMIN_PASSWORD, 12);
-
-    await User.create({
-      name: ADMIN_NAME.trim(),
-      email,
-      password: hashedPassword,
-      role: "admin",
+    await prisma.user.create({
+      data: {
+        name: ADMIN_NAME.trim(),
+        email,
+        password: hashedPassword,
+        role: "admin",
+      },
     });
 
     console.log("Admin account created successfully.");
@@ -46,8 +53,7 @@ async function createAdmin() {
     console.error("Admin setup failed:", error.message);
     process.exitCode = 1;
   } finally {
-    const mongoose = require("mongoose");
-    await mongoose.disconnect();
+    await prisma.$disconnect();
   }
 }
 

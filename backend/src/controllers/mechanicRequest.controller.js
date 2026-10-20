@@ -1,12 +1,16 @@
+const { prisma } = require("../config/db");
+const sendPrismaError = require("../utils/prismaErrors");
+const { serializeEmergencyRequest } = require("../utils/serializers");
 
-const mongoose = require("mongoose");
-const Mechanic = require("../models/Mechanic");
-const EmergencyRequest = require("../models/EmergencyRequest");
+function validRecordId(id) {
+  return typeof id === "string" && id.trim().length > 0 && id.length <= 100;
+}
 
 async function getMyRequests(req, res) {
   try {
-    const mechanic = await Mechanic.findOne({
-      user: req.user.userId,
+    const mechanic = await prisma.mechanic.findUnique({
+      where: { userId: req.user.userId },
+      select: { id: true },
     });
 
     if (!mechanic) {
@@ -16,45 +20,53 @@ async function getMyRequests(req, res) {
       });
     }
 
-    const requests = await EmergencyRequest.find({
-      mechanic: mechanic._id,
-    })
-      .populate("customer", "name phone")
-      .populate(
-        "vehicle",
-        "make model year registrationNumber"
-      )
-      .sort({ createdAt: -1 })
-      .lean();
+    const requests = await prisma.emergencyRequest.findMany({
+      where: { mechanicId: mechanic.id },
+      include: {
+        customer: {
+          select: {
+            id: true,
+            name: true,
+            phone: true,
+          },
+        },
+        vehicle: {
+          select: {
+            id: true,
+            make: true,
+            model: true,
+            year: true,
+            registrationNumber: true,
+          },
+        },
+      },
+      orderBy: { createdAt: "desc" },
+    });
 
     return res.status(200).json({
       success: true,
       count: requests.length,
-      requests,
+      requests: requests.map(serializeEmergencyRequest),
     });
   } catch (error) {
     console.error("Get mechanic requests error:", error.message);
-
-    return res.status(500).json({
-      success: false,
-      message: "Unable to fetch assistance requests",
-    });
+    return sendPrismaError(res, error, "Unable to fetch assistance requests");
   }
 }
 
 async function acceptRequest(req, res) {
   try {
     const { requestId } = req.params;
-
-    if (!mongoose.Types.ObjectId.isValid(requestId)) {
+    if (!validRecordId(requestId)) {
       return res.status(400).json({
         success: false,
         message: "Invalid request ID",
       });
     }
 
-    const mechanic = await Mechanic.findOne({
-      user: req.user.userId,
+    const mechanic = await prisma.mechanic.findUnique({
+      where: { userId: req.user.userId },
+      select: { id: true },
     });
 
     if (!mechanic) {
@@ -64,52 +76,43 @@ async function acceptRequest(req, res) {
       });
     }
 
-    // Accept only a pending request assigned to this mechanic.
-    const request = await EmergencyRequest.findOneAndUpdate(
-      {
-        _id: requestId,
-        mechanic: mechanic._id,
+    const result = await prisma.emergencyRequest.updateMany({
+      where: {
+        id: requestId,
+        mechanicId: mechanic.id,
         status: "pending",
       },
-      {
-        $set: { status: "accepted" },
-      },
-      {
-        new: true,
-        runValidators: true,
-      }
-    );
+      data: { status: "accepted" },
+    });
 
-    if (!request) {
+    if (result.count === 0) {
       return res.status(404).json({
         success: false,
-        message:
-          "Pending request not found in your assigned requests",
+        message: "Pending request not found in your assigned requests",
       });
     }
+
+    const request = await prisma.emergencyRequest.findUnique({
+      where: { id: requestId },
+    });
 
     return res.status(200).json({
       success: true,
       message: "Assistance request accepted",
-      request,
+      request: serializeEmergencyRequest(request),
     });
   } catch (error) {
     console.error("Accept request error:", error.message);
-
-    return res.status(500).json({
-      success: false,
-      message: "Unable to accept assistance request",
-    });
+    return sendPrismaError(res, error, "Unable to accept assistance request");
   }
 }
-
 
 async function updateRequestStatus(req, res) {
   try {
     const { requestId } = req.params;
     const { status } = req.body;
 
-    if (!mongoose.Types.ObjectId.isValid(requestId)) {
+    if (!validRecordId(requestId)) {
       return res.status(400).json({
         success: false,
         message: "Invalid request ID",
@@ -123,8 +126,9 @@ async function updateRequestStatus(req, res) {
       });
     }
 
-    const mechanic = await Mechanic.findOne({
-      user: req.user.userId,
+    const mechanic = await prisma.mechanic.findUnique({
+      where: { userId: req.user.userId },
+      select: { id: true },
     });
 
     if (!mechanic) {
@@ -134,26 +138,17 @@ async function updateRequestStatus(req, res) {
       });
     }
 
-    // Allow only the correct next status.
-    const previousStatus =
-      status === "in_progress" ? "accepted" : "in_progress";
-
-    const request = await EmergencyRequest.findOneAndUpdate(
-      {
-        _id: requestId,
-        mechanic: mechanic._id,
+    const previousStatus = status === "in_progress" ? "accepted" : "in_progress";
+    const result = await prisma.emergencyRequest.updateMany({
+      where: {
+        id: requestId,
+        mechanicId: mechanic.id,
         status: previousStatus,
       },
-      {
-        $set: { status },
-      },
-      {
-        new: true,
-        runValidators: true,
-      }
-    );
+      data: { status },
+    });
 
-    if (!request) {
+    if (result.count === 0) {
       return res.status(400).json({
         success: false,
         message:
@@ -161,21 +156,20 @@ async function updateRequestStatus(req, res) {
       });
     }
 
+    const request = await prisma.emergencyRequest.findUnique({
+      where: { id: requestId },
+    });
+
     return res.status(200).json({
       success: true,
       message: `Request status updated to ${status}`,
-      request,
+      request: serializeEmergencyRequest(request),
     });
   } catch (error) {
     console.error("Update request status error:", error.message);
-
-    return res.status(500).json({
-      success: false,
-      message: "Unable to update request status",
-    });
+    return sendPrismaError(res, error, "Unable to update request status");
   }
 }
-
 
 module.exports = {
   getMyRequests,

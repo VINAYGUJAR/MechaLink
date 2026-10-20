@@ -3,17 +3,27 @@ import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import api from "../api/axios";
 import { useAuth } from "../context/AuthContext";
+import { getCurrentBrowserLocation } from "../utils/browserLocation";
+import {
+  getPlaceDetails,
+  searchPlaces,
+} from "../utils/places";
 
 function CustomerDashboard() {
   const navigate = useNavigate();
   const { user, logout } = useAuth();
 
   const [vehicles, setVehicles] = useState([]);
-  const [address, setAddress] = useState("");
+  const [locationSearch, setLocationSearch] = useState("");
+  const [locationSuggestions, setLocationSuggestions] = useState([]);
+  const [selectedLocation, setSelectedLocation] = useState(null);
   const [savedAddress, setSavedAddress] = useState("");
+  const [searchingLocations, setSearchingLocations] = useState(false);
+  const [gettingCurrentLocation, setGettingCurrentLocation] = useState(false);
   const [loading, setLoading] = useState(true);
   const [savingVehicle, setSavingVehicle] = useState(false);
   const [savingAddress, setSavingAddress] = useState(false);
+  const [locationSearchError, setLocationSearchError] = useState("");
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
 
@@ -42,12 +52,27 @@ function CustomerDashboard() {
       }
 
       if (locationResult.status === "fulfilled") {
-        const saved = locationResult.value.data.address || "";
-        setAddress(saved);
+        const data = locationResult.value.data;
+        const saved = data.formattedAddress || data.address || "";
+        const coordinates = data.location?.coordinates;
+        setLocationSearch(saved);
         setSavedAddress(saved);
+        setSelectedLocation(
+          Array.isArray(coordinates) &&
+            Number.isFinite(coordinates[0]) &&
+            Number.isFinite(coordinates[1])
+            ? {
+                name: data.name || saved,
+                formattedAddress: saved,
+                longitude: coordinates[0],
+                latitude: coordinates[1],
+              }
+            : null
+        );
       } else if (locationResult.reason?.response?.status === 404) {
-        setAddress("");
+        setLocationSearch("");
         setSavedAddress("");
+        setSelectedLocation(null);
       } else {
         throw new Error("Could not load your saved breakdown address.");
       }
@@ -65,6 +90,39 @@ function CustomerDashboard() {
   useEffect(() => {
     loadDashboard();
   }, [loadDashboard]);
+
+  useEffect(() => {
+    const query = locationSearch.trim();
+
+    if (query.length < 3 || selectedLocation?.formattedAddress === query) {
+      return undefined;
+    }
+
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      setSearchingLocations(true);
+      setLocationSearchError("");
+
+      try {
+        const suggestions = await searchPlaces(query);
+        if (!cancelled) setLocationSuggestions(suggestions);
+      } catch (searchError) {
+        if (!cancelled) {
+          setLocationSuggestions([]);
+          setLocationSearchError(
+            searchError.message || "Address suggestions are unavailable."
+          );
+        }
+      } finally {
+        if (!cancelled) setSearchingLocations(false);
+      }
+    }, 300);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [locationSearch, selectedLocation]);
 
   function handleVehicleChange(event) {
     setVehicleForm({
@@ -115,25 +173,78 @@ function CustomerDashboard() {
     event.preventDefault();
     setError("");
     setSuccess("");
+
+    if (!selectedLocation) {
+      setError("Choose a suggested address or use your current location first.");
+      return;
+    }
+
     setSavingAddress(true);
 
     try {
       const response = await api.put("/customer-location/me", {
-        address: address.trim(),
+        name: selectedLocation.name,
+        formattedAddress: selectedLocation.formattedAddress,
+        latitude: selectedLocation.latitude,
+        longitude: selectedLocation.longitude,
       });
 
-      const confirmedAddress = response.data.address || address.trim();
-
-      setAddress(confirmedAddress);
+      const confirmedAddress =
+        response.data.formattedAddress ||
+        response.data.address ||
+        selectedLocation.formattedAddress;
+      setLocationSearch(confirmedAddress);
       setSavedAddress(confirmedAddress);
+      setSelectedLocation({
+        ...selectedLocation,
+        name: response.data.name || selectedLocation.name,
+        formattedAddress: confirmedAddress,
+      });
+      setLocationSuggestions([]);
       setSuccess("Breakdown address saved successfully.");
     } catch (err) {
       setError(
-        err.response?.data?.message ||
-          "Could not save the address. Check the address and try again."
+        err.response?.data?.message || "Could not save the selected location."
       );
     } finally {
       setSavingAddress(false);
+    }
+  }
+
+  async function handleUseCurrentLocation() {
+    setError("");
+    setSuccess("");
+    setLocationSearchError("");
+    setSearchingLocations(false);
+
+    setGettingCurrentLocation(true);
+
+    try {
+      const { latitude, longitude } = await getCurrentBrowserLocation();
+
+      const currentLocation = {
+        name: "Current location",
+        formattedAddress: "Current location",
+        latitude,
+        longitude,
+      };
+      setSelectedLocation(currentLocation);
+      setLocationSearch("Current location");
+      setLocationSuggestions([]);
+      setSuccess("Current location selected. Save it to find nearby mechanics.");
+    } catch (locationError) {
+      const messages = {
+        1: "Location permission was denied. Allow location access in your browser and try again.",
+        2: "Your current location is unavailable. Check your device location settings and try again.",
+        3: "The location request timed out. Please try again.",
+      };
+      setError(
+        messages[locationError.code] ||
+          locationError.message ||
+          "Could not retrieve your current location."
+      );
+    } finally {
+      setGettingCurrentLocation(false);
     }
   }
 
@@ -335,41 +446,127 @@ function CustomerDashboard() {
             </h3>
 
             <p className="mt-1 text-sm text-slate-500">
-              Enter an address where you usually need roadside assistance.
-              You can update it when needed.
+              Use your current location or search for an address. Save the
+              selected coordinates to find mechanics within 5 km.
             </p>
 
             <form onSubmit={handleSaveAddress} className="mt-5 space-y-4">
+              <button
+                type="button"
+                onClick={handleUseCurrentLocation}
+                disabled={gettingCurrentLocation || savingAddress}
+                className="w-full rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 font-semibold text-blue-800 hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {gettingCurrentLocation
+                  ? "Getting current location..."
+                  : "Use Current Location"}
+              </button>
+
+              <div className="text-center text-sm font-medium text-slate-400">
+                OR
+              </div>
+
               <div>
-                <label htmlFor="address" className="text-sm font-medium">
-                  Address
+                <label htmlFor="location-search" className="text-sm font-medium">
+                  Search Location
                 </label>
-                <textarea
-                  id="address"
-                  required
-                  minLength={5}
-                  rows={4}
-                  value={address}
-                  onChange={(event) => setAddress(event.target.value)}
+                <input
+                  id="location-search"
+                  type="search"
+                  autoComplete="off"
+                  value={locationSearch}
+                  onChange={(event) => {
+                    const query = event.target.value;
+                    setLocationSearch(query);
+                    setSelectedLocation(null);
+                    setLocationSuggestions([]);
+                    setLocationSearchError("");
+                    setSearchingLocations(query.trim().length >= 3);
+                    setError("");
+                    setSuccess("");
+                  }}
                   className={inputClass}
-                  placeholder="Enter your area, road, city and nearby landmark"
+                  placeholder="Type an address and select a suggestion"
                 />
               </div>
 
+              {searchingLocations && (
+                <p className="text-sm text-slate-500">Searching locations...</p>
+              )}
+
+              {locationSearchError && (
+                <p role="alert" className="text-sm text-red-700">
+                  {locationSearchError}
+                </p>
+              )}
+
+              {locationSearch.trim().length >= 3 &&
+                !searchingLocations &&
+                !locationSearchError &&
+                !selectedLocation &&
+                locationSuggestions.length === 0 && (
+                  <p className="text-sm text-slate-500">
+                    No matching locations found. Try a more complete address.
+                  </p>
+                )}
+
+              {locationSuggestions.length > 0 && (
+                <ul className="overflow-hidden rounded-lg border border-slate-200">
+                  {locationSuggestions.map((suggestion, index) => (
+                    <li key={`${suggestion.description}-${index}`}>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          setLocationSearchError("");
+                          setSearchingLocations(true);
+
+                          try {
+                            const place = await getPlaceDetails(
+                              suggestion.prediction,
+                              suggestion.provider
+                            );
+                            setSelectedLocation(place);
+                            setLocationSearch(place.formattedAddress);
+                            setLocationSuggestions([]);
+                          } catch (selectionError) {
+                            setLocationSearchError(
+                              selectionError.message ||
+                                "Could not load the selected location."
+                            );
+                          } finally {
+                            setSearchingLocations(false);
+                          }
+                        }}
+                        className="w-full border-b border-slate-100 px-3 py-3 text-left text-sm text-slate-700 last:border-0 hover:bg-blue-50"
+                      >
+                        {suggestion.description}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+
+              {selectedLocation && (
+                <div className="rounded-lg border border-blue-100 bg-blue-50 p-4">
+                  <p className="font-semibold text-slate-800">
+                    {selectedLocation.name}
+                  </p>
+                  <p className="mt-1 text-sm text-slate-600">
+                    {selectedLocation.formattedAddress}
+                  </p>
+                  <p className="mt-1 text-xs text-slate-500">
+                    {selectedLocation.latitude.toFixed(6)},{" "}
+                    {selectedLocation.longitude.toFixed(6)}
+                  </p>
+                </div>
+              )}
+
               <button
                 type="submit"
-                disabled={
-                  savingAddress ||
-                  !address.trim() ||
-                  address.trim() === savedAddress
-                }
+                disabled={savingAddress || !selectedLocation}
                 className="w-full rounded-lg bg-blue-700 px-4 py-3 font-semibold text-white hover:bg-blue-800 disabled:opacity-60"
               >
-                {savingAddress
-                  ? "Saving..."
-                  : savedAddress && address.trim() === savedAddress
-                    ? "Address Saved"
-                    : "Save Breakdown Address"}
+                {savingAddress ? "Saving..." : "Save Breakdown Location"}
               </button>
             </form>
 

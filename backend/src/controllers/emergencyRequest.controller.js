@@ -1,9 +1,11 @@
+const { prisma } = require("../config/db");
+const findNearbyMechanics = require("../services/nearbyMechanics.service");
+const sendPrismaError = require("../utils/prismaErrors");
+const { serializeEmergencyRequest } = require("../utils/serializers");
 
-const mongoose = require("mongoose");
-const EmergencyRequest = require("../models/EmergencyRequest");
-const Vehicle = require("../models/Vehicle");
-const Mechanic = require("../models/Mechanic");
-const CustomerLocation = require("../models/CustomerLocation");
+function validRecordId(id) {
+  return typeof id === "string" && id.trim().length > 0 && id.length <= 100;
+}
 
 async function createEmergencyRequest(req, res) {
   try {
@@ -11,24 +13,14 @@ async function createEmergencyRequest(req, res) {
     const radiusKm = Number(req.body.radiusKm ?? 5);
 
     if (
-      !vehicleId ||
-      !mechanicId ||
+      !validRecordId(vehicleId) ||
+      !validRecordId(mechanicId) ||
       typeof description !== "string" ||
       !description.trim()
     ) {
       return res.status(400).json({
         success: false,
         message: "Vehicle, mechanic, and description are required",
-      });
-    }
-
-    if (
-      !mongoose.Types.ObjectId.isValid(vehicleId) ||
-      !mongoose.Types.ObjectId.isValid(mechanicId)
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid vehicle ID or mechanic ID",
       });
     }
 
@@ -46,10 +38,11 @@ async function createEmergencyRequest(req, res) {
       });
     }
 
-    // Confirm the vehicle belongs to this customer.
-    const vehicle = await Vehicle.findOne({
-      _id: vehicleId,
-      owner: req.user.userId,
+    const vehicle = await prisma.vehicle.findFirst({
+      where: {
+        id: vehicleId,
+        ownerId: req.user.userId,
+      },
     });
 
     if (!vehicle) {
@@ -59,9 +52,8 @@ async function createEmergencyRequest(req, res) {
       });
     }
 
-    // Use the customer's saved breakdown address.
-    const customerLocation = await CustomerLocation.findOne({
-      customer: req.user.userId,
+    const customerLocation = await prisma.customerLocation.findUnique({
+      where: { customerId: req.user.userId },
     });
 
     if (!customerLocation) {
@@ -71,17 +63,14 @@ async function createEmergencyRequest(req, res) {
       });
     }
 
-    // The selected mechanic must be approved and within the radius.
-    const mechanic = await Mechanic.findOne({
-      _id: mechanicId,
-      verificationStatus: "approved",
-      location: {
-        $near: {
-          $geometry: customerLocation.location,
-          $maxDistance: radiusKm * 1000,
-        },
-      },
+    const matchingMechanics = await findNearbyMechanics({
+      latitude: customerLocation.latitude,
+      longitude: customerLocation.longitude,
+      radiusKm,
+      mechanicId,
+      limit: 1,
     });
+    const mechanic = matchingMechanics[0];
 
     if (!mechanic) {
       return res.status(400).json({
@@ -90,85 +79,87 @@ async function createEmergencyRequest(req, res) {
       });
     }
 
-    const request = await EmergencyRequest.create({
-      customer: req.user.userId,
-      vehicle: vehicle._id,
-      mechanic: mechanic._id,
-      breakdownAddress: customerLocation.address,
-      breakdownLocation: customerLocation.location,
-      description: description.trim(),
+    const request = await prisma.emergencyRequest.create({
+      data: {
+        customerId: req.user.userId,
+        vehicleId: vehicle.id,
+        mechanicId: mechanic.id,
+        breakdownAddress: customerLocation.address,
+        breakdownLongitude: customerLocation.longitude,
+        breakdownLatitude: customerLocation.latitude,
+        description: description.trim(),
+      },
     });
 
     return res.status(201).json({
       success: true,
       message: "Emergency assistance request created",
-      request,
+      request: serializeEmergencyRequest(request),
     });
   } catch (error) {
     console.error("Create emergency request error:", error.message);
-
-    return res.status(500).json({
-      success: false,
-      message: "Unable to create assistance request",
-    });
+    return sendPrismaError(res, error, "Unable to create assistance request");
   }
 }
 
-
 async function getMyEmergencyRequests(req, res) {
   try {
-    const requests = await EmergencyRequest.find({
-      customer: req.user.userId,
-    })
-      .populate("vehicle", "make model year registrationNumber")
-      .populate("mechanic", "garageName garageAddress services")
-      .sort({ createdAt: -1 })
-      .lean();
+    const requests = await prisma.emergencyRequest.findMany({
+      where: { customerId: req.user.userId },
+      include: {
+        vehicle: {
+          select: {
+            id: true,
+            make: true,
+            model: true,
+            year: true,
+            registrationNumber: true,
+          },
+        },
+        mechanic: {
+          select: {
+            id: true,
+            userId: true,
+            garageName: true,
+            garageAddress: true,
+            services: true,
+          },
+        },
+      },
+      orderBy: { createdAt: "desc" },
+    });
 
     return res.status(200).json({
       success: true,
       count: requests.length,
-      requests,
+      requests: requests.map(serializeEmergencyRequest),
     });
   } catch (error) {
     console.error("Get customer requests error:", error.message);
-
-    return res.status(500).json({
-      success: false,
-      message: "Unable to fetch your assistance requests",
-    });
+    return sendPrismaError(res, error, "Unable to fetch your assistance requests");
   }
 }
-
 
 async function cancelMyEmergencyRequest(req, res) {
   try {
     const { requestId } = req.params;
-
-    if (!mongoose.Types.ObjectId.isValid(requestId)) {
+    if (!validRecordId(requestId)) {
       return res.status(400).json({
         success: false,
         message: "Invalid request ID",
       });
     }
 
-    // Cancel only a pending request owned by this customer.
-    const request = await EmergencyRequest.findOneAndUpdate(
-      {
-        _id: requestId,
-        customer: req.user.userId,
+    const result = await prisma.emergencyRequest.updateMany({
+      where: {
+        id: requestId,
+        customerId: req.user.userId,
         status: "pending",
       },
-      {
-        $set: { status: "cancelled" },
-      },
-      {
-        new: true,
-        runValidators: true,
-      }
-    );
+      data: { status: "cancelled" },
+    });
 
-    if (!request) {
+    if (result.count === 0) {
       return res.status(400).json({
         success: false,
         message:
@@ -176,23 +167,23 @@ async function cancelMyEmergencyRequest(req, res) {
       });
     }
 
+    const request = await prisma.emergencyRequest.findUnique({
+      where: { id: requestId },
+    });
+
     return res.status(200).json({
       success: true,
       message: "Assistance request cancelled successfully",
-      request,
+      request: serializeEmergencyRequest(request),
     });
   } catch (error) {
     console.error("Cancel request error:", error.message);
-
-    return res.status(500).json({
-      success: false,
-      message: "Unable to cancel assistance request",
-    });
+    return sendPrismaError(res, error, "Unable to cancel assistance request");
   }
 }
 
-
-module.exports = { createEmergencyRequest ,   
-                   getMyEmergencyRequests,
-                   cancelMyEmergencyRequest,
-                };
+module.exports = {
+  createEmergencyRequest,
+  getMyEmergencyRequests,
+  cancelMyEmergencyRequest,
+};

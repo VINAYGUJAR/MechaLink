@@ -1,11 +1,10 @@
-
-const Mechanic = require("../models/Mechanic");
-const geocodeAddress = require("../services/geocoding.service");
-
+const { prisma } = require("../config/db");
+const sendPrismaError = require("../utils/prismaErrors");
+const { geoJsonPoint, serializeMechanic } = require("../utils/serializers");
 
 async function updateMyLocation(req, res) {
   try {
-    const { address } = req.body;
+    const { name, address, latitude, longitude } = req.body || {};
 
     if (
       typeof address !== "string" ||
@@ -14,38 +13,32 @@ async function updateMyLocation(req, res) {
     ) {
       return res.status(400).json({
         success: false,
-        message: "Please provide a valid garage address",
+        message: "Please select a valid garage location",
       });
     }
 
-    const result = await geocodeAddress(address.trim());
-
-    if (!result) {
+    if (
+      (name !== undefined &&
+        (typeof name !== "string" || !name.trim() || name.trim().length > 160)) ||
+      typeof latitude !== "number" ||
+      !Number.isFinite(latitude) ||
+      latitude < -90 ||
+      latitude > 90 ||
+      typeof longitude !== "number" ||
+      !Number.isFinite(longitude) ||
+      longitude < -180 ||
+      longitude > 180
+    ) {
       return res.status(400).json({
         success: false,
-        message: "Address not found. Please enter a more complete address",
+        message: "Please select a garage location with valid coordinates",
       });
     }
 
-    const profile = await Mechanic.findOneAndUpdate(
-      { user: req.user.userId },
-      {
-        $set: {
-          garageAddress: result.formattedAddress,
-          location: {
-            type: "Point",
-            coordinates: [
-              result.longitude,
-              result.latitude,
-            ],
-          },
-        },
-      },
-      {
-        new: true,
-        runValidators: true,
-      }
-    );
+    const profile = await prisma.mechanic.findUnique({
+      where: { userId: req.user.userId },
+      select: { id: true },
+    });
 
     if (!profile) {
       return res.status(404).json({
@@ -54,22 +47,27 @@ async function updateMyLocation(req, res) {
       });
     }
 
+    const updatedProfile = await prisma.mechanic.update({
+      where: { id: profile.id },
+      data: {
+        garageAddress: address.trim(),
+        longitude,
+        latitude,
+      },
+    });
+
     return res.status(200).json({
       success: true,
       message: "Garage address and location saved successfully",
-      garageAddress: profile.garageAddress,
-      location: profile.location,
+      name: name?.trim() || updatedProfile.garageAddress,
+      garageAddress: updatedProfile.garageAddress,
+      location: geoJsonPoint(updatedProfile.longitude, updatedProfile.latitude),
     });
   } catch (error) {
     console.error("Update location error:", error.message);
-
-    return res.status(500).json({
-      success: false,
-      message: "Unable to update garage location",
-    });
+    return sendPrismaError(res, error, "Unable to update garage location");
   }
 }
-
 
 async function createMyProfile(req, res) {
   try {
@@ -77,21 +75,22 @@ async function createMyProfile(req, res) {
 
     if (
       typeof garageName !== "string" ||
-      !garageName.trim()
+      !garageName.trim() ||
+      garageName.trim().length > 100
     ) {
       return res.status(400).json({
         success: false,
-        message: "Garage name is required",
+        message: "Garage name is required and cannot exceed 100 characters",
       });
     }
 
     if (
       description !== undefined &&
-      typeof description !== "string"
+      (typeof description !== "string" || description.trim().length > 1000)
     ) {
       return res.status(400).json({
         success: false,
-        message: "Description must be text",
+        message: "Description must be text of at most 1000 characters",
       });
     }
 
@@ -110,8 +109,9 @@ async function createMyProfile(req, res) {
       });
     }
 
-    const existingProfile = await Mechanic.findOne({
-      user: req.user.userId,
+    const existingProfile = await prisma.mechanic.findUnique({
+      where: { userId: req.user.userId },
+      select: { id: true },
     });
 
     if (existingProfile) {
@@ -121,32 +121,36 @@ async function createMyProfile(req, res) {
       });
     }
 
-    const profile = await Mechanic.create({
-      user: req.user.userId,
-      garageName: garageName.trim(),
-      description: description?.trim() || "",
-      services: services?.map((service) => service.trim()) || [],
+    const profile = await prisma.mechanic.create({
+      data: {
+        userId: req.user.userId,
+        garageName: garageName.trim(),
+        description: description?.trim() || "",
+        services: services?.map((service) => service.trim()) || [],
+      },
     });
 
     return res.status(201).json({
       success: true,
       message: "Mechanic profile created and awaiting verification",
-      profile,
+      profile: serializeMechanic(profile),
     });
   } catch (error) {
     console.error("Create mechanic profile error:", error.message);
-
-    return res.status(500).json({
-      success: false,
-      message: "Unable to create mechanic profile",
-    });
+    if (error.code === "P2002") {
+      return res.status(409).json({
+        success: false,
+        message: "Mechanic profile already exists",
+      });
+    }
+    return sendPrismaError(res, error, "Unable to create mechanic profile");
   }
 }
 
 async function getMyProfile(req, res) {
   try {
-    const profile = await Mechanic.findOne({
-      user: req.user.userId,
+    const profile = await prisma.mechanic.findUnique({
+      where: { userId: req.user.userId },
     });
 
     if (!profile) {
@@ -158,15 +162,11 @@ async function getMyProfile(req, res) {
 
     return res.status(200).json({
       success: true,
-      profile,
+      profile: serializeMechanic(profile),
     });
   } catch (error) {
     console.error("Get mechanic profile error:", error.message);
-
-    return res.status(500).json({
-      success: false,
-      message: "Unable to retrieve mechanic profile",
-    });
+    return sendPrismaError(res, error, "Unable to retrieve mechanic profile");
   }
 }
 
